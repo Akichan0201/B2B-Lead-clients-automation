@@ -1,0 +1,469 @@
+{
+  "name": "Automated B2B Lead Intelligence System - Stage 1",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "schedule-trigger-1",
+      "name": "Schedule Trigger (Every 6h)"
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "GOOGLE_GEMINI_API_KEY",
+              "value": "={{ $env.GOOGLE_GEMINI_API_KEY || 'YOUR_GEMINI_API_KEY' }}"
+            },
+            {
+              "name": "PYTHON_COLLECTOR_URL",
+              "value": "={{ $env.PYTHON_COLLECTOR_URL || 'http://python_collector:8000' }}"
+            },
+            {
+              "name": "TELEGRAM_BOT_TOKEN",
+              "value": "={{ $env.TELEGRAM_BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN' }}"
+            },
+            {
+              "name": "TELEGRAM_CHAT_ID",
+              "value": "={{ $env.TELEGRAM_CHAT_ID || 'YOUR_TELEGRAM_CHAT_ID' }}"
+            },
+            {
+              "name": "COMPANY_NAME",
+              "value": "={{ $env.COMPANY_NAME || 'Tech Solutions Agency' }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ],
+      "id": "set-config-1",
+      "name": "Load Configuration"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT group_name, language, keyword_phrase FROM lead_keywords WHERE is_active = TRUE ORDER BY RANDOM() LIMIT 6;"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        440,
+        0
+      ],
+      "id": "postgres-keywords-1",
+      "name": "Fetch Keyword Groups from DB",
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred-id",
+          "name": "Local Postgres Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst keywords = items.map(item => item.json.keyword_phrase);\nconst queries = [];\n\nconst platformTarget = [\n  { platform: 'linkedin', prefix: 'site:linkedin.com/posts' },\n  { platform: 'threads', prefix: 'site:threads.net' },\n  { platform: 'facebook', prefix: 'site:facebook.com' }\n];\n\nfor (const target of platformTarget) {\n  for (const kw of keywords) {\n    queries.push(`\"${kw}\" ${target.prefix}`);\n  }\n}\n\nreturn [{\n  json: {\n    platform: 'multi_platform',\n    keywords: keywords,\n    queries: queries.slice(0, 10),\n    max_results: 10\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "id": "code-generate-queries-1",
+      "name": "Search Query Generator"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Load Configuration').item.json.PYTHON_COLLECTOR_URL }}/api/v1/collect",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"platform\": \"{{ $json.platform }}\",\n  \"keywords\": {{ JSON.stringify($json.keywords) }},\n  \"queries\": {{ JSON.stringify($json.queries) }},\n  \"max_results\": {{ $json.max_results }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        0
+      ],
+      "id": "http-python-collector-1",
+      "name": "Call Python Collector Microservice",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first()?.json || {};\nconst candidates = response.candidates || [];\n\nreturn candidates.map(c => ({\n  json: {\n    platform: c.platform,\n    post_url: c.post_url,\n    author_name: c.author_name,\n    author_url: c.author_url,\n    post_text: c.post_text,\n    posted_at: c.posted_at,\n    matched_keywords: c.matched_keywords,\n    source_query: c.source_query,\n    post_text_hash: c.post_text_hash\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ],
+      "id": "code-flatten-candidates-1",
+      "name": "Flatten Candidate Leads"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT post_url, post_text_hash FROM leads WHERE created_at >= NOW() - INTERVAL '30 days';"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        1320,
+        0
+      ],
+      "id": "postgres-dedup-check-1",
+      "name": "Check Existing URLs in DB",
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred-id",
+          "name": "Local Postgres Database"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const candidates = $('Flatten Candidate Leads').all();\nconst existingDbRows = $input.all();\n\nconst existingUrls = new Set(existingDbRows.map(row => row.json.post_url));\nconst existingHashes = new Set(existingDbRows.map(row => row.json.post_text_hash));\nconst newItems = [];\n\nfor (const candidate of candidates) {\n  const url = candidate.json.post_url;\n  const hash = candidate.json.post_text_hash;\n  if (url && !existingUrls.has(url) && !existingHashes.has(hash)) {\n    newItems.push(candidate);\n  }\n}\n\nreturn newItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        0
+      ],
+      "id": "code-filter-duplicates-1",
+      "name": "Filter Out Existing Duplicates"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={{ $('Load Configuration').item.json.GOOGLE_GEMINI_API_KEY }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"You are a Senior Lead Intelligence Analyst for a Software & Web Agency.\\n\\nEvaluate the post below to determine if the author is a POTENTIAL CLIENT with buying intent.\\n\\nCRITICAL DISCRIMINATION RULES:\\n1. BUYER vs PROVIDER:\\n   - BUYER (is_potential_client = true): Someone needing web dev, app, system, hosting, automation, or IT help.\\n   - PROVIDER (is_potential_client = false): Someone advertising their own freelance/agency services or portfolio.\\n\\n2. OUTSOURCING vs FULL-TIME EMPLOYEE:\\n   - AGENCY NEED (is_project_or_agency_need = true): Looking for an agency, freelancer, contractor, vendor, or project provider.\\n   - FULL-TIME HR JOB AD (is_project_or_agency_need = false): Traditional full-time internal employee hiring.\\n\\nPOST DETAILS:\\nPlatform: {{ $json.platform }}\\nAuthor: {{ $json.author_name }}\\nPost Text: {{ $json.post_text }}\\nDate: {{ $json.posted_at }}\\n\\nReturn ONLY JSON matching schema:\\n{\\n  \\\"is_lead\\\": boolean,\\n  \\\"is_potential_client\\\": boolean,\\n  \\\"is_project_or_agency_need\\\": boolean,\\n  \\\"intent\\\": \\\"DIRECT_REQUEST | HIRING_AGENCY | OUTSOURCING | RECOMMENDATION_REQUEST | BUSINESS_PROBLEM | SELLING_SERVICE | HIRING_EMPLOYEE | IRRELEVANT\\\",\\n  \\\"service_needed\\\": string | null,\\n  \\\"problem\\\": string | null,\\n  \\\"urgency\\\": \\\"HIGH | MEDIUM | LOW | UNKNOWN\\\",\\n  \\\"budget_signal\\\": string | null,\\n  \\\"business_type\\\": \\\"SOLO | SMB | MID_MARKET | ENTERPRISE | UNKNOWN\\\",\\n  \\\"company_name\\\": string | null,\\n  \\\"decision_maker_probability\\\": number,\\n  \\\"reason\\\": string\\n}\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"response_mime_type\": \"application/json\",\n    \"temperature\": 0.1\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "http-gemini-ai-1",
+      "name": "Google Gemini Lead Qualification AI",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst processed = [];\nconst filteredCandidates = $('Filter Out Existing Duplicates').all();\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const candidate = filteredCandidates[i]?.json || {};\n  \n  let aiRes = {};\n  try {\n    let rawText = item.json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n    rawText = rawText.replace(/^```json\\s*/i, '').replace(/\\s*```$/i, '').trim();\n    aiRes = JSON.parse(rawText);\n  } catch (err) {\n    aiRes = {\n      is_lead: false,\n      is_potential_client: false,\n      is_project_or_agency_need: false,\n      intent: 'IRRELEVANT',\n      reason: 'JSON parse error from Gemini AI: ' + err.message\n    };\n  }\n  \n  processed.push({\n    json: {\n      ...candidate,\n      ai_result: aiRes\n    }\n  });\n}\n\nreturn processed;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        0
+      ],
+      "id": "code-parse-ai-1",
+      "name": "Parse & Standardize AI Response"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst scoredLeads = [];\n\nfor (const item of items) {\n  const data = item.json;\n  const ai = data.ai_result || {};\n  \n  let score = 0;\n  \n  if (ai.is_potential_client && ai.is_project_or_agency_need) {\n    if (['DIRECT_REQUEST', 'HIRING_AGENCY', 'OUTSOURCING'].includes(ai.intent)) score += 30;\n    else if (ai.intent === 'RECOMMENDATION_REQUEST') score += 20;\n    else if (ai.intent === 'BUSINESS_PROBLEM') score += 15;\n    \n    if (ai.problem && ai.problem.length > 10) score += 15;\n    if (ai.urgency === 'HIGH') score += 15;\n    if (ai.budget_signal) score += 10;\n    if (ai.company_name || ['SMB', 'MID_MARKET', 'ENTERPRISE'].includes(ai.business_type)) score += 10;\n  }\n  \n  if (ai.intent === 'HIRING_EMPLOYEE') score -= 50;\n  if (ai.intent === 'SELLING_SERVICE') score -= 50;\n  if (['GENERAL_DISCUSSION', 'EDUCATIONAL'].includes(ai.intent)) score -= 30;\n  if (ai.intent === 'IRRELEVANT' || !ai.is_lead) score -= 50;\n  \n  score = Math.max(0, Math.min(100, score));\n  \n  let temp = 'IRRELEVANT';\n  if (score >= 80) temp = 'HOT';\n  else if (score >= 50) temp = 'WARM';\n  else if (score >= 20) temp = 'COLD';\n  \n  const safeString = (val) => val ? String(val).replace(/'/g, \"''\") : null;\n\n  scoredLeads.push({\n    json: {\n      platform: data.platform || 'web',\n      post_url: data.post_url,\n      author_name: safeString(data.author_name || ai.company_name),\n      author_url: safeString(data.author_url),\n      post_text: safeString(data.post_text),\n      posted_at: data.posted_at || new Date().toISOString(),\n      matched_keywords: JSON.stringify(data.matched_keywords || []),\n      service_needed: safeString(ai.service_needed),\n      intent: ai.intent || 'IRRELEVANT',\n      lead_score: score,\n      lead_temperature: temp,\n      urgency: ai.urgency || 'UNKNOWN',\n      budget_signal: safeString(ai.budget_signal),\n      business_type: ai.business_type || 'UNKNOWN',\n      qualification_reason: safeString(ai.reason),\n      suggested_outreach_angle: safeString(ai.problem ? `Help solve ${ai.problem}` : 'Propose tech partnership'),\n      status: 'NEW',\n      post_text_hash: data.post_text_hash,\n      is_qualified: ['HOT', 'WARM', 'COLD'].includes(temp)\n    }\n  });\n}\n\nreturn scoredLeads;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        0
+      ],
+      "id": "code-scoring-engine-1",
+      "name": "Deterministic Lead Scoring Engine"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_qualified }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        0
+      ],
+      "id": "if-lead-validation-1",
+      "name": "Filter Qualified Leads (HOT/WARM/COLD)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (platform, post_url, author_name, author_url, post_text, posted_at, matched_keywords, service_needed, intent, lead_score, lead_temperature, urgency, budget_signal, business_type, qualification_reason, suggested_outreach_angle, status, post_text_hash) VALUES ('{{ $json.platform }}', '{{ $json.post_url }}', {{ $json.author_name ? \"'\" + $json.author_name + \"'\" : \"NULL\" }}, {{ $json.author_url ? \"'\" + $json.author_url + \"'\" : \"NULL\" }}, '{{ $json.post_text }}', '{{ $json.posted_at }}', '{{ $json.matched_keywords }}'::jsonb, {{ $json.service_needed ? \"'\" + $json.service_needed + \"'\" : \"NULL\" }}, '{{ $json.intent }}', {{ $json.lead_score }}, '{{ $json.lead_temperature }}', '{{ $json.urgency }}', {{ $json.budget_signal ? \"'\" + $json.budget_signal + \"'\" : \"NULL\" }}, '{{ $json.business_type }}', {{ $json.qualification_reason ? \"'\" + $json.qualification_reason + \"'\" : \"NULL\" }}, {{ $json.suggested_outreach_angle ? \"'\" + $json.suggested_outreach_angle + \"'\" : \"NULL\" }}, '{{ $json.status }}', '{{ $json.post_text_hash }}') ON CONFLICT (post_url) DO UPDATE SET updated_at = NOW() RETURNING id, platform, post_url, author_name, service_needed, intent, lead_score, lead_temperature, urgency, budget_signal, status;"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2640,
+        -100
+      ],
+      "id": "postgres-insert-lead-1",
+      "name": "Persist Lead into PostgreSQL",
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred-id",
+          "name": "Local Postgres Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_processing_logs (platform, post_url, post_text_hash, status, rejection_reason) VALUES ('{{ $json.platform }}', '{{ $json.post_url }}', '{{ $json.post_text_hash }}', 'REJECTED_IRRELEVANT', '{{ $json.qualification_reason }}');"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2640,
+        100
+      ],
+      "id": "postgres-log-rejected-1",
+      "name": "Log Rejected Lead (Audit)",
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred-id",
+          "name": "Local Postgres Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2860,
+        -100
+      ],
+      "id": "google-sheets-dashboard-1",
+      "name": "Sync Qualified Leads to Google Sheets",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-cred-id",
+          "name": "Google Sheets Account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger (Every 6h)": {
+      "main": [
+        [
+          {
+            "node": "Load Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Configuration": {
+      "main": [
+        [
+          {
+            "node": "Fetch Keyword Groups from DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Keyword Groups from DB": {
+      "main": [
+        [
+          {
+            "node": "Search Query Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Query Generator": {
+      "main": [
+        [
+          {
+            "node": "Call Python Collector Microservice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Python Collector Microservice": {
+      "main": [
+        [
+          {
+            "node": "Flatten Candidate Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten Candidate Leads": {
+      "main": [
+        [
+          {
+            "node": "Check Existing URLs in DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing URLs in DB": {
+      "main": [
+        [
+          {
+            "node": "Filter Out Existing Duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Out Existing Duplicates": {
+      "main": [
+        [
+          {
+            "node": "Google Gemini Lead Qualification AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Lead Qualification AI": {
+      "main": [
+        [
+          {
+            "node": "Parse & Standardize AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Standardize AI Response": {
+      "main": [
+        [
+          {
+            "node": "Deterministic Lead Scoring Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deterministic Lead Scoring Engine": {
+      "main": [
+        [
+          {
+            "node": "Filter Qualified Leads (HOT/WARM/COLD)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Qualified Leads (HOT/WARM/COLD)": {
+      "main": [
+        [
+          {
+            "node": "Persist Lead into PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Rejected Lead (Audit)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Lead into PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Sync Qualified Leads to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "name": "Stage 1A: Python Webhook to Google Sheets (Raw Posts)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trigger-lead-scan",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "webhook-trigger-1",
+      "name": "Webhook - Incoming Candidates",
+      "webhookId": "trigger-lead-scan"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first()?.json?.body || $input.first()?.json || {};\nconst candidates = body.candidates || [];\nconst collectedAt = new Date().toISOString();\n\nif (!Array.isArray(candidates) || candidates.length === 0) {\n  return [];\n}\n\nreturn candidates.map((c, index) => {\n  const matchedKws = Array.isArray(c.matched_keywords) \n    ? c.matched_keywords.join(', ') \n    : (c.matched_keywords || '');\n\n  return {\n    json: {\n      id: c.post_text_hash ? c.post_text_hash.substring(0, 16) : `lead_${Date.now()}_${index}`,\n      platform: c.platform || 'web',\n      post_url: c.post_url || '',\n      author_name: c.author_name || 'Public Poster',\n      author_url: c.author_url || '',\n      post_text: c.post_text || '',\n      posted_at: c.posted_at || collectedAt,\n      matched_keywords: matchedKws,\n      source_query: c.source_query || '',\n      post_text_hash: c.post_text_hash || '',\n      collected_at: collectedAt\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "id": "code-normalize-1",
+      "name": "Normalize Data & Split Items"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "lead_posts_raw"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        520,
+        0
+      ],
+      "id": "google-sheets-raw-1",
+      "name": "Google Sheets - Append Raw Posts",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-cred-id",
+          "name": "Google Sheets Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook - Incoming Candidates": {
+      "main": [
+        [
+          {
+            "node": "Normalize Data & Split Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Data & Split Items": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Append Raw Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

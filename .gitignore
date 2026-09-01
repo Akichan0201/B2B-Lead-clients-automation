@@ -1,0 +1,50 @@
+# ==============================================================================
+# B2B LEAD INTELLIGENCE SYSTEM - GITIGNORE
+# ==============================================================================
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables & Secret Files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Logs & Temporary Data
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# Docker & Local Service Data Volumes
+postgres_data/
+n8n_data/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
