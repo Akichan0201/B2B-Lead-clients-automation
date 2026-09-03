@@ -1,0 +1,154 @@
+{
+  "name": "Stage 1B: Webhook -> Gemini AI Qualification -> Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trigger-lead-scan",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "webhook-trigger-1",
+      "name": "Webhook - Incoming Candidates",
+      "webhookId": "trigger-lead-scan"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first()?.json?.body || $input.first()?.json || {};\nconst candidates = body.candidates || [];\nconst collectedAt = new Date().toISOString();\n\nif (!Array.isArray(candidates) || candidates.length === 0) {\n  return [];\n}\n\nreturn candidates.map((c, index) => {\n  const matchedKws = Array.isArray(c.matched_keywords) \n    ? c.matched_keywords.join(', ') \n    : (c.matched_keywords || '');\n\n  return {\n    json: {\n      id: c.post_text_hash ? c.post_text_hash.substring(0, 16) : `lead_${Date.now()}_${index}`,\n      platform: c.platform || 'web',\n      post_url: c.post_url || '',\n      author_name: c.author_name || 'Public Poster',\n      author_url: c.author_url || '',\n      post_text: c.post_text || '',\n      posted_at: c.posted_at || collectedAt,\n      matched_keywords: matchedKws,\n      source_query: c.source_query || '',\n      post_text_hash: c.post_text_hash || '',\n      collected_at: collectedAt\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "id": "code-normalize-1",
+      "name": "Normalize Data & Split Items"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={{ $env.GOOGLE_GEMINI_API_KEY || 'YOUR_GEMINI_API_KEY' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"You are the AI Lead Qualification Engine for Wednesdev, a B2B technology service provider.\\n\\nYour primary objective is to identify social media or web posts where the author shows a REAL and CREDIBLE need for an external technology service (Web Dev, Custom Software, Business Systems, ERP/CRM, Automation, AI, Hosting/VPS, Maintenance, Data Scraping/Integration, Technical Support, IT Outsourcing).\\n\\nCORE DISCRIMINATION RULES:\\n1. BUYER vs PROVIDER:\\n   - BUYER (is_potential_client = true, is_provider = false): Looking for someone ELSE to provide or build a tech solution.\\n   - PROVIDER (is_potential_client = false, is_provider = true): Advertising own freelance/agency services, portfolio, or asking 'Need a website? Contact us'.\\n\\n2. PROJECT/OUTSOURCING vs FULL-TIME HR JOB:\\n   - QUALIFIED (is_fulltime_job = false): Asking for a freelancer, contractor, agency, vendor, outsourcing company, or external dev team.\\n   - REJECT (is_fulltime_job = true, is_potential_client = false): Full-time W-2/employee recruitment ('We are hiring a full-time React developer').\\n\\n3. MARKETING HOOK / AD DETECTION:\\n   - Misleading marketing hooks like 'Looking for web developers? We can help!' MUST be classified as PROVIDER_AD or MARKETING_CONTENT -> REJECT.\\n\\n4. BUSINESS PROBLEM SIGNAL:\\n   - Real operational pain points ('Process is manual', 'Website slow/down') are QUALIFIED leads even if not explicitly saying 'I need a developer'.\\n\\nINPUT POST:\\nPlatform: {{ $json.platform }}\\nAuthor: {{ $json.author_name }}\\nPost URL: {{ $json.post_url }}\\nMatched Keywords: {{ $json.matched_keywords }}\\nPost Text: {{ $json.post_text }}\\n\\nReturn ONLY valid JSON matching this schema:\\n{\\n  \\\"is_potential_client\\\": boolean,\\n  \\\"intent_type\\\": \\\"PROJECT_REQUEST | VENDOR_RECOMMENDATION | BUSINESS_PROBLEM | OUTSOURCING_NEED | GENERAL_INQUIRY | FULL_TIME_JOB | PROVIDER_AD | MARKETING_CONTENT | IRRELEVANT\\\",\\n  \\\"is_provider\\\": boolean,\\n  \\\"is_fulltime_job\\\": boolean,\\n  \\\"need\\\": string,\\n  \\\"urgency\\\": \\\"HIGH | MEDIUM | LOW | UNKNOWN\\\",\\n  \\\"budget_signal\\\": boolean,\\n  \\\"qualification_reason\\\": string\\n}\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"response_mime_type\": \"application/json\",\n    \"temperature\": 0.1\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        0
+      ],
+      "id": "http-gemini-ai-1",
+      "name": "Google Gemini Lead Qualification AI",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst processed = [];\nconst candidateItems = $('Normalize Data & Split Items').all();\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const candidate = candidateItems[i]?.json || {};\n  \n  let aiRes = {};\n  try {\n    let rawText = item.json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n    rawText = rawText.replace(/^```json\\s*/i, '').replace(/\\s*```$/i, '').trim();\n    aiRes = JSON.parse(rawText);\n  } catch (err) {\n    aiRes = {\n      is_potential_client: false,\n      intent_type: 'IRRELEVANT',\n      is_provider: false,\n      is_fulltime_job: false,\n      need: 'Unknown',\n      urgency: 'UNKNOWN',\n      budget_signal: false,\n      qualification_reason: 'JSON parse error from Gemini AI: ' + err.message\n    };\n  }\n  \n  processed.push({\n    json: {\n      ...candidate,\n      is_potential_client: Boolean(aiRes.is_potential_client),\n      intent_type: aiRes.intent_type || 'IRRELEVANT',\n      is_provider: Boolean(aiRes.is_provider),\n      is_fulltime_job: Boolean(aiRes.is_fulltime_job),\n      need: aiRes.need || '',\n      urgency: aiRes.urgency || 'UNKNOWN',\n      budget_signal: Boolean(aiRes.budget_signal),\n      qualification_reason: aiRes.qualification_reason || ''\n    }\n  });\n}\n\nreturn processed;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ],
+      "id": "code-parse-ai-1",
+      "name": "Parse & Standardize AI Response"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "lead_posts_qualified"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "google-sheets-qualified-1",
+      "name": "Google Sheets - Append Qualified Posts",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-cred-id",
+          "name": "Google Sheets Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook - Incoming Candidates": {
+      "main": [
+        [
+          {
+            "node": "Normalize Data & Split Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Data & Split Items": {
+      "main": [
+        [
+          {
+            "node": "Google Gemini Lead Qualification AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Lead Qualification AI": {
+      "main": [
+        [
+          {
+            "node": "Parse & Standardize AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Standardize AI Response": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Append Qualified Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

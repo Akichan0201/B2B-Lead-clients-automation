@@ -1,0 +1,435 @@
+{
+  "name": "Automated B2B Lead Intelligence System - Master Stage 1 Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trigger-lead-scan",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "webhook-trigger-1",
+      "name": "Webhook - Incoming Candidates",
+      "webhookId": "trigger-lead-scan"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first()?.json?.body || $input.first()?.json || {};\nconst candidates = body.candidates || [];\nconst collectedAt = new Date().toISOString();\n\nif (!Array.isArray(candidates) || candidates.length === 0) {\n  return [];\n}\n\nreturn candidates.map((c, index) => {\n  const matchedKws = Array.isArray(c.matched_keywords) \n    ? c.matched_keywords.join(', ') \n    : (c.matched_keywords || '');\n\n  return {\n    json: {\n      id: c.post_text_hash ? c.post_text_hash.substring(0, 16) : `lead_${Date.now()}_${index}`,\n      platform: c.platform || 'web',\n      post_url: c.post_url || '',\n      author_name: c.author_name || 'Public Poster',\n      author_url: c.author_url || '',\n      post_text: c.post_text || '',\n      posted_at: c.posted_at || collectedAt,\n      matched_keywords: matchedKws,\n      source_query: c.source_query || '',\n      post_text_hash: c.post_text_hash || '',\n      collected_at: collectedAt\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "id": "code-normalize-1",
+      "name": "Normalize Data & Split Items"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT post_url, post_text_hash FROM leads WHERE created_at >= NOW() - INTERVAL '30 days';"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        520,
+        0
+      ],
+      "id": "postgres-dedup-check-1",
+      "name": "Check Existing URLs in Postgres",
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred-id",
+          "name": "Local Postgres Database"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const candidates = $('Normalize Data & Split Items').all();\nconst existingDbRows = $input.all();\n\nconst existingUrls = new Set(existingDbRows.map(row => row.json.post_url));\nconst existingHashes = new Set(existingDbRows.map(row => row.json.post_text_hash));\nconst newItems = [];\n\nfor (const candidate of candidates) {\n  const url = candidate.json.post_url;\n  const hash = candidate.json.post_text_hash;\n  if (url && !existingUrls.has(url) && !existingHashes.has(hash)) {\n    newItems.push(candidate);\n  }\n}\n\nreturn newItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ],
+      "id": "code-filter-duplicates-1",
+      "name": "Filter Out Existing Duplicates"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={{ $env.GOOGLE_GEMINI_API_KEY || 'YOUR_GEMINI_API_KEY' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"You are the AI Lead Qualification Engine for Wednesdev, a B2B technology service provider.\\n\\nYour primary objective is to identify social media or web posts where the author shows a REAL and CREDIBLE need for an external technology service (Web Dev, Custom Software, Business Systems, ERP/CRM, Automation, AI, Hosting/VPS, Maintenance, Data Scraping/Integration, Technical Support, IT Outsourcing).\\n\\nCORE DISCRIMINATION RULES:\\n1. BUYER vs PROVIDER:\\n   - BUYER (is_potential_client = true, is_provider = false): Looking for someone ELSE to provide or build a tech solution.\\n   - PROVIDER (is_potential_client = false, is_provider = true): Advertising own freelance/agency services, portfolio, or asking 'Need a website? Contact us'.\\n\\n2. PROJECT/OUTSOURCING vs FULL-TIME HR JOB:\\n   - QUALIFIED (is_fulltime_job = false): Asking for a freelancer, contractor, agency, vendor, outsourcing company, or external dev team.\\n   - REJECT (is_fulltime_job = true, is_potential_client = false): Full-time W-2/employee recruitment ('We are hiring a full-time React developer').\\n\\n3. MARKETING HOOK / AD DETECTION:\\n   - Misleading marketing hooks like 'Looking for web developers? We can help!' MUST be classified as PROVIDER_AD or MARKETING_CONTENT -> REJECT.\\n\\n4. BUSINESS PROBLEM SIGNAL:\\n   - Real operational pain points ('Process is manual', 'Website slow/down') are QUALIFIED leads even if not explicitly saying 'I need a developer'.\\n\\nINPUT POST:\\nPlatform: {{ $json.platform }}\\nAuthor: {{ $json.author_name }}\\nPost URL: {{ $json.post_url }}\\nMatched Keywords: {{ $json.matched_keywords }}\\nPost Text: {{ $json.post_text }}\\n\\nReturn ONLY valid JSON matching this schema:\\n{\\n  \\\"is_potential_client\\\": boolean,\\n  \\\"intent_type\\\": \\\"PROJECT_REQUEST | VENDOR_RECOMMENDATION | BUSINESS_PROBLEM | OUTSOURCING_NEED | GENERAL_INQUIRY | FULL_TIME_JOB | PROVIDER_AD | MARKETING_CONTENT | IRRELEVANT\\\",\\n  \\\"is_provider\\\": boolean,\\n  \\\"is_fulltime_job\\\": boolean,\\n  \\\"need\\\": string,\\n  \\\"urgency\\\": \\\"HIGH | MEDIUM | LOW | UNKNOWN\\\",\\n  \\\"budget_signal\\\": boolean,\\n  \\\"qualification_reason\\\": string\\n}\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"response_mime_type\": \"application/json\",\n    \"temperature\": 0.1\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "http-gemini-ai-1",
+      "name": "Google Gemini Lead Qualification AI",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst processed = [];\nconst candidateItems = $('Filter Out Existing Duplicates').all();\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const candidate = candidateItems[i]?.json || {};\n  \n  let aiRes = {};\n  try {\n    let rawText = item.json.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n    rawText = rawText.replace(/^```json\\s*/i, '').replace(/\\s*```$/i, '').trim();\n    aiRes = JSON.parse(rawText);\n  } catch (err) {\n    aiRes = {\n      is_potential_client: false,\n      intent_type: 'IRRELEVANT',\n      is_provider: false,\n      is_fulltime_job: false,\n      need: 'Unknown',\n      urgency: 'UNKNOWN',\n      budget_signal: false,\n      qualification_reason: 'JSON parse error from Gemini AI: ' + err.message\n    };\n  }\n  \n  processed.push({\n    json: {\n      ...candidate,\n      ai_result: aiRes\n    }\n  });\n}\n\nreturn processed;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        0
+      ],
+      "id": "code-parse-ai-1",
+      "name": "Parse & Standardize AI Response"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst scoredLeads = [];\n\nfor (const item of items) {\n  const data = item.json;\n  const ai = data.ai_result || {};\n  \n  let score = 0;\n  \n  if (ai.is_potential_client && !ai.is_provider && !ai.is_fulltime_job) {\n    if (['PROJECT_REQUEST', 'OUTSOURCING_NEED'].includes(ai.intent_type)) score += 30;\n    else if (ai.intent_type === 'VENDOR_RECOMMENDATION') score += 20;\n    else if (ai.intent_type === 'BUSINESS_PROBLEM') score += 15;\n    \n    if (ai.need && ai.need.length > 5) score += 15;\n    if (ai.urgency === 'HIGH') score += 15;\n    if (ai.budget_signal) score += 10;\n  }\n  \n  if (ai.is_fulltime_job) score -= 50;\n  if (ai.is_provider) score -= 50;\n  if (['GENERAL_INQUIRY', 'MARKETING_CONTENT'].includes(ai.intent_type)) score -= 30;\n  if (ai.intent_type === 'IRRELEVANT' || !ai.is_potential_client) score -= 50;\n  \n  score = Math.max(0, Math.min(100, score));\n  \n  let temp = 'IRRELEVANT';\n  if (score >= 80) temp = 'HOT';\n  else if (score >= 50) temp = 'WARM';\n  else if (score >= 20) temp = 'COLD';\n  \n  const safeString = (val) => val ? String(val).replace(/'/g, \"''\") : null;\n\n  scoredLeads.push({\n    json: {\n      platform: data.platform || 'web',\n      post_url: data.post_url,\n      author_name: safeString(data.author_name),\n      author_url: safeString(data.author_url),\n      post_text: safeString(data.post_text),\n      posted_at: data.posted_at || new Date().toISOString(),\n      matched_keywords: JSON.stringify(data.matched_keywords || []),\n      service_needed: safeString(ai.need),\n      intent: ai.intent_type || 'IRRELEVANT',\n      lead_score: score,\n      lead_temperature: temp,\n      urgency: ai.urgency || 'UNKNOWN',\n      budget_signal: ai.budget_signal ? 'YES' : 'NO',\n      business_type: 'SMB',\n      qualification_reason: safeString(ai.qualification_reason),\n      suggested_outreach_angle: safeString(ai.need ? `Provide specialized solutions for ${ai.need}` : 'Propose tech partnership'),\n      status: 'NEW',\n      post_text_hash: data.post_text_hash,\n      is_qualified: ['HOT', 'WARM', 'COLD'].includes(temp)\n    }\n  });\n}\n\nreturn scoredLeads;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        0
+      ],
+      "id": "code-scoring-engine-1",
+      "name": "Deterministic Lead Scoring Engine"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_qualified }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        0
+      ],
+      "id": "if-lead-validation-1",
+      "name": "Filter Qualified Leads (HOT/WARM/COLD)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO leads (platform, post_url, author_name, author_url, post_text, posted_at, matched_keywords, service_needed, intent, lead_score, lead_temperature, urgency, budget_signal, business_type, qualification_reason, suggested_outreach_angle, status, post_text_hash) VALUES ('{{ $json.platform }}', '{{ $json.post_url }}', {{ $json.author_name ? \"'\" + $json.author_name + \"'\" : \"NULL\" }}, {{ $json.author_url ? \"'\" + $json.author_url + \"'\" : \"NULL\" }}, '{{ $json.post_text }}', '{{ $json.posted_at }}', '{{ $json.matched_keywords }}'::jsonb, {{ $json.service_needed ? \"'\" + $json.service_needed + \"'\" : \"NULL\" }}, '{{ $json.intent }}', {{ $json.lead_score }}, '{{ $json.lead_temperature }}', '{{ $json.urgency }}', {{ $json.budget_signal ? \"'\" + $json.budget_signal + \"'\" : \"NULL\" }}, '{{ $json.business_type }}', {{ $json.qualification_reason ? \"'\" + $json.qualification_reason + \"'\" : \"NULL\" }}, {{ $json.suggested_outreach_angle ? \"'\" + $json.suggested_outreach_angle + \"'\" : \"NULL\" }}, '{{ $json.status }}', '{{ $json.post_text_hash }}') ON CONFLICT (post_url) DO UPDATE SET updated_at = NOW() RETURNING id, platform, post_url, author_name, service_needed, intent, lead_score, lead_temperature, urgency, budget_signal, status;"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2080,
+        -100
+      ],
+      "id": "postgres-insert-lead-1",
+      "name": "Persist Lead into PostgreSQL Warehouse",
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred-id",
+          "name": "Local Postgres Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_processing_logs (platform, post_url, post_text_hash, status, rejection_reason) VALUES ('{{ $json.platform }}', '{{ $json.post_url }}', '{{ $json.post_text_hash }}', 'REJECTED_IRRELEVANT', '{{ $json.qualification_reason }}');"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2080,
+        100
+      ],
+      "id": "postgres-log-rejected-1",
+      "name": "Log Rejected Lead (Audit)",
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred-id",
+          "name": "Local Postgres Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "lead_posts_qualified"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2340,
+        -100
+      ],
+      "id": "google-sheets-dashboard-1",
+      "name": "Sync Qualified Leads to Google Sheets",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-cred-id",
+          "name": "Google Sheets Account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.lead_temperature }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "HOT"
+            },
+            {
+              "value2": "WARM"
+            },
+            {
+              "value2": "COLD"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2600,
+        -100
+      ],
+      "id": "switch-hot-routing-1",
+      "name": "Route Lead Temperature"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN || 'YOUR_BOT_TOKEN' }}/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": \"{{ $env.TELEGRAM_CHAT_ID || 'YOUR_CHAT_ID' }}\",\n  \"parse_mode\": \"HTML\",\n  \"text\": \"🔥 <b>HOT LEAD DETECTED FOR WEDNESDEV!</b>\\n\\n<b>Score:</b> {{ $json.lead_score }}/100 (HOT)\\n<b>Platform:</b> {{ $json.platform }}\\n<b>Author/Client:</b> {{ $json.author_name || 'Prospect' }}\\n<b>Service Needed:</b> {{ $json.service_needed }}\\n\\n💡 <b>Qualification Reason:</b>\\n<i>{{ $json.qualification_reason }}</i>\\n\\n🔗 <a href=\\\"{{ $json.post_url }}\\\">View Original Public Post</a>\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        -200
+      ],
+      "id": "http-telegram-hot-alert-1",
+      "name": "Send HOT Lead Telegram Alert",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_followups (lead_id, followup_step, scheduled_at, status, channel) VALUES ('{{ $json.id }}', 1, NOW() + INTERVAL '24 hours', 'PENDING', 'WHATSAPP');"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        2860,
+        0
+      ],
+      "id": "postgres-queue-stage2-1",
+      "name": "Queue Stage 2 Followup Hook",
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred-id",
+          "name": "Local Postgres Database"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook - Incoming Candidates": {
+      "main": [
+        [
+          {
+            "node": "Normalize Data & Split Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Data & Split Items": {
+      "main": [
+        [
+          {
+            "node": "Check Existing URLs in Postgres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing URLs in Postgres": {
+      "main": [
+        [
+          {
+            "node": "Filter Out Existing Duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Out Existing Duplicates": {
+      "main": [
+        [
+          {
+            "node": "Google Gemini Lead Qualification AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Lead Qualification AI": {
+      "main": [
+        [
+          {
+            "node": "Parse & Standardize AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Standardize AI Response": {
+      "main": [
+        [
+          {
+            "node": "Deterministic Lead Scoring Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deterministic Lead Scoring Engine": {
+      "main": [
+        [
+          {
+            "node": "Filter Qualified Leads (HOT/WARM/COLD)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Qualified Leads (HOT/WARM/COLD)": {
+      "main": [
+        [
+          {
+            "node": "Persist Lead into PostgreSQL Warehouse",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Rejected Lead (Audit)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Lead into PostgreSQL Warehouse": {
+      "main": [
+        [
+          {
+            "node": "Sync Qualified Leads to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync Qualified Leads to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Route Lead Temperature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Lead Temperature": {
+      "main": [
+        [
+          {
+            "node": "Send HOT Lead Telegram Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Queue Stage 2 Followup Hook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Queue Stage 2 Followup Hook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

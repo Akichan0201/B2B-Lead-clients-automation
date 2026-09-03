@@ -1,6 +1,7 @@
 import os
 import re
 import hashlib
+from urllib.parse import urlparse
 from datetime import datetime
 from typing import List, Optional
 import requests
@@ -125,11 +126,17 @@ def collect_leads_endpoint(req: CollectRequest):
 
             data = resp.json()
             organic_results = data.get("organic", [])
+            print(f"🔎 Query: {query_str}")
+            print(f"📦 Serper returned: {len(organic_results)} result(s)")
 
             for item in organic_results:
                 link = item.get("link", "")
                 if not link or link in seen_urls:
                     continue
+
+            if not is_valid_platform_url(link, req.platform):
+                print(f"⚠️ Rejected non-{req.platform} result: {link}")
+                continue
 
                 seen_urls.add(link)
                 title = item.get("title", "")
@@ -150,7 +157,7 @@ def collect_leads_endpoint(req: CollectRequest):
                         author_name = parts[1].split("-")[0].capitalize()
 
                 candidates.append(CandidateLead(
-                    platform=detect_platform(link),
+                    platform=req.platform.lower(),
                     post_url=link,
                     author_name=author_name or "Public Poster",
                     author_url=link if "profile" in link or "in/" in link else None,
@@ -170,6 +177,63 @@ def collect_leads_endpoint(req: CollectRequest):
         total_collected=len(candidates),
         candidates=candidates
     )
+    
+def is_valid_platform_url(url: str, target_platform: str) -> bool:
+    if not url:
+        return False
+
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        path = (parsed.path or "").lower()
+    except Exception:
+        return False
+
+    host = host.removeprefix("www.")
+    target = target_platform.lower().strip()
+
+    # Web mode accepts any URL
+    if target == "web":
+        return True
+
+    # LinkedIn
+    if target == "linkedin":
+        return (
+            host == "linkedin.com"
+            and (
+                "/posts/" in path
+                or "/feed/update/" in path
+            )
+        )
+
+    # Threads
+    if target == "threads":
+        return (
+            host == "threads.net"
+            and "/post/" in path
+        )
+
+    # Facebook
+    if target == "facebook":
+        return (
+            host in {"facebook.com", "fb.com"}
+            and (
+                "/posts/" in path
+                or "/permalink.php" in path
+                or "/groups/" in path
+            )
+        )
+
+    # X / Twitter
+    if target == "x":
+        return (
+            host in {
+                "x.com",
+                "twitter.com"
+            }
+            and "/status/" in path
+        )
+    return False
 
 if __name__ == "__main__":
     import uvicorn
